@@ -6,6 +6,8 @@
 #include <linux/debugfs.h>
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
+#include <linux/seq_file.h>
+#include <linux/notifier.h>
 
 #include "lib/pt_capture.h"
 
@@ -16,16 +18,20 @@ static struct dentry *debug_cpumsrs;
 static spinlock_t trace_lock;
 static int tracing_enabled;
 
+/* ---------- enabled debugfs file ---------- */
+
 static ssize_t enabled_read(struct file *f, char __user *buf,
                             size_t cnt, loff_t *ppos)
 {
     char kbuf[8];
     int len;
+    int val;
 
     if (*ppos > 0)
         return 0;
 
-    len = snprintf(kbuf, sizeof(kbuf), "%d\n", tracing_enabled);
+    val = READ_ONCE(tracing_enabled);
+    len = snprintf(kbuf, sizeof(kbuf), "%d\n", val);
 
     if (copy_to_user(buf, kbuf, len))
         return -EFAULT;
@@ -53,16 +59,20 @@ static ssize_t enabled_write(struct file *f, const char __user *buf,
     if (ret)
         return ret;
 
+    /* Only accept 0 or 1 */
+    if (val != 0 && val != 1)
+        return -EINVAL;
+
     spin_lock(&trace_lock);
 
     if (val && !tracing_enabled) {
         on_each_cpu(pt_start_cpu, NULL, 1);
-        tracing_enabled = 1;
+        WRITE_ONCE(tracing_enabled, 1);
         pt_info("Tracing enabled\n");
 
     } else if (!val && tracing_enabled) {
         on_each_cpu(pt_stop_cpu, NULL, 1);
-        tracing_enabled = 0;
+        WRITE_ONCE(tracing_enabled, 0);
         pt_info("Tracing disabled\n");
     }
 
@@ -76,21 +86,25 @@ static const struct file_operations enabled_fops = {
     .write = enabled_write,
 };
 
+/* ---------- cpumsrs debugfs file ---------- */
+
 static int cpumsrs_show(struct seq_file *m, void *v)
 {
     int cpu;
 
     seq_puts(m,
-        "CPU  PhysAddr           Size      IA32_RTIT_CTL       STATUS              OUTPUT_MASK\n");
+         "CPU  DataPhys           Size      ToPAPhys           OUT_BASE           IA32_RTIT_CTL       STATUS              OUT_MASK_PTRS\n");
 
     for_each_online_cpu(cpu) {
         const struct pt_cpu_meta *meta = &pt_meta[cpu];
 
         seq_printf(m,
-            "%3d  0x%016llx  %8llu  0x%016llx  0x%016llx  0x%016llx\n",
+             "%3d  0x%016llx  %8llu  0x%016llx  0x%016llx  0x%016llx  0x%016llx  0x%016llx\n",
             meta->cpu,
             (unsigned long long)meta->buf_phys,
             meta->buf_size,
+            (unsigned long long)meta->topa_phys,
+            (unsigned long long)meta->msr_output_base,
             meta->msr_ctl,
             meta->msr_status,
             meta->msr_output_mask);
@@ -112,11 +126,14 @@ static const struct file_operations cpumsrs_fops = {
     .release = single_release,
 };
 
-/* Panic notifier block */
+/* ---------- Panic notifier block ---------- */
+
 static struct notifier_block pt_nb = {
     .notifier_call = pt_panic_handler,
-    .priority = INT_MAX,
+    .priority      = INT_MAX,
 };
+
+/* ---------- Module init/exit ---------- */
 
 static int __init pt_capture_init(void)
 {
@@ -139,11 +156,22 @@ static int __init pt_capture_init(void)
     if (!debug_dir)
         return -ENOMEM;
 
-    debug_enabled = debugfs_create_file("enabled", 0644, debug_dir, NULL, &enabled_fops);
-    debug_cpumsrs = debugfs_create_file("cpumsrs", 0444, debug_dir, NULL, &cpumsrs_fops);
+    debug_enabled = debugfs_create_file("enabled", 0644, debug_dir,
+                                        NULL, &enabled_fops);
+    debug_cpumsrs = debugfs_create_file("cpumsrs", 0444, debug_dir,
+                                        NULL, &cpumsrs_fops);
 
-    /* Register panic notifier */
-    atomic_notifier_chain_register(&panic_notifier_list, &pt_nb);
+    if (!debug_enabled || !debug_cpumsrs)
+        pt_info("pt_capture: some debugfs entries may be missing\n");
+
+    /*
+     * Register panic notifier. On your RHEL 9.6, panic_notifier_list
+     * is available to modules; if it weren't, you'd see an unknown
+     * symbol error at insmod time.
+     */
+    ret = atomic_notifier_chain_register(&panic_notifier_list, &pt_nb);
+    if (ret)
+        pt_err("Failed to register panic notifier: %d\n", ret);
 
     return 0;
 }
@@ -153,7 +181,7 @@ static void __exit pt_capture_exit(void)
     pt_info("Unloading PT Capture...\n");
 
     /* Stop tracing if active */
-    if (tracing_enabled)
+    if (READ_ONCE(tracing_enabled))
         on_each_cpu(pt_stop_cpu, NULL, 1);
 
     atomic_notifier_chain_unregister(&panic_notifier_list, &pt_nb);
@@ -169,3 +197,4 @@ module_exit(pt_capture_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ajay Rangisetti");
 MODULE_DESCRIPTION("Intel PT Crash Capture Module");
+

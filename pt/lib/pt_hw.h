@@ -1,4 +1,3 @@
-
 #ifndef _PT_HW_H
 #define _PT_HW_H
 
@@ -6,11 +5,17 @@
 #include <linux/types.h>
 
 struct pt_cpu_meta {
-    u32 cpu;
-    phys_addr_t buf_phys;
+    int cpu;
     u64 buf_size;
+    phys_addr_t buf_phys;
 
-    /* Snapshot MSRs (captured on panic) */
+    /* NEW: ToPA table physical address (per CPU) */
+    phys_addr_t topa_phys;
+
+    /* NEW: snapshot of IA32_RTIT_OUTPUT_BASE */
+    u64 msr_output_base;
+
+    /* already existing fields (you had these) */
     u64 msr_ctl;
     u64 msr_status;
     u64 msr_output_mask;
@@ -30,3 +35,4 @@ void pt_snapshot_cpu(void *info);
 int pt_panic_handler(struct notifier_block *nb, unsigned long event, void *unused);
 
 #endif
+
