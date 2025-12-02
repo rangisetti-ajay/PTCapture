@@ -5,7 +5,7 @@
 Intel PT Capture Kernel Module
 
 
-
+```
     [PTCapture module]                 [Kernel crash infra]             [Post-mortem tools]
   ┌────────────────────────┐      ┌──────────────────────────┐      ┌────────────────────────┐
   │  Intel PT Crash Tracer │      │      kdump / vmcore      │      │  vmcore + PT decoder   │
